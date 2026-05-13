@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Backup rules used by Android 12+ (data-extraction).
+
+cloud-backup: include SharedPreferences so the sealed device-info data is
+restored when the app is reinstalled on the same physical device (or
+restored on a new device set up from the same Google account, which IT
+must catch via re-attestation before issuing the device to a worker).
+
+device-transfer: deliberately empty (no include rules). When Android's
+"Switch to new device" tool runs, it will NOT copy the device-info
+SharedPreferences, because we want a new physical device to provision
+fresh against its own *#06# rather than inherit the IMEI of an older
+phone.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="."/>
+        <exclude domain="file" path="."/>
+        <exclude domain="database" path="."/>
+        <exclude domain="external" path="."/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="."/>
+        <exclude domain="file" path="."/>
+        <exclude domain="database" path="."/>
+        <exclude domain="external" path="."/>
+    </device-transfer>
+</data-extraction-rules>

@@ -57,7 +57,7 @@ const _editGraceDuration = Duration(minutes: 15);
 
 class Store {
   static const _s = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(encryptedSharedPreferences: false),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
   static Future<String?> read(String k) => _s.read(key: k);

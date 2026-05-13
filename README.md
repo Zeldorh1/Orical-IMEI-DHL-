@@ -26,9 +26,23 @@ Concretely, the threat this addresses is on-device value substitution: a warehou
 
 Stated up front so the security pitch isn't oversold:
 
-- **Does not bind the stored IMEI to device hardware.** The operator types the value during provisioning. The defense against substitution rests on (a) the operator doing the attestation honestly at provisioning and (b) values being immutable after sealing. If the wrong IMEI is typed at step 1 and the attestation is ticked anyway, the wrong IMEI gets sealed.
+- **Does not bind the stored IMEI to device hardware.** The operator types the value during provisioning. The defense against substitution rests on (a) the operator doing the attestation honestly at provisioning and (b) values being immutable after the 15-minute typo-fix window closes. If the wrong IMEI is typed at step 1 and the attestation is ticked anyway, the wrong IMEI gets sealed.
 - **Does not prevent photographing the displayed barcode.** Someone can point a second camera at the screen and capture the barcode visually; the resulting image can be displayed on a different phone. The defense against this is workflow, not software — e.g., the checkpoint also dials `*#06#` directly, or visually inspects that the operator is holding one phone, not stacking two.
 - **Does not survive a rooted/jailbroken device.** Anything on-device can be tampered with given root.
+
+## Persistence across uninstall
+
+The threat being addressed here: a warehouse associate uninstalls the app to wipe the sealed data, then reinstalls and re-provisions with a different IMEI. The app tries to make this expensive.
+
+- **iOS.** App data lives in the system Keychain. Apple's Keychain preserves items across app uninstall by default since iOS 10.3 — no app code required, no user opt-in. Uninstall + reinstall on the same iPhone restores the IMEI, the passkey hash, and the sealed timestamp automatically. The "you must factory-reset to start over" guarantee holds.
+
+- **Android.** App data goes into plain SharedPreferences (the values stored are non-secret IMEIs, hashes, salts, and timestamps — see Security model below). The app enables Android's Auto Backup: SharedPreferences are backed up to the user's Google Drive once a day and restored automatically on reinstall. So on a Google-account-enrolled device, uninstall + reinstall on the same phone gets the data back. Limitations to know:
+  - Requires the device to be signed into a Google account with Google Play Services.
+  - User can disable Auto Backup in `Settings → System → Backup`.
+  - First reinstall *immediately* after uninstall may miss the most recent ~24 hours of changes (Auto Backup is daily).
+  - The `<device-transfer>` rules deliberately exclude the SharedPreferences, so Android's "Switch to new device" tool does NOT copy the IMEI binding to a new physical phone. New phone = fresh provisioning.
+
+- **The real production answer is MDM.** In a warehouse with thousands of devices, the operator should not be able to uninstall the app at all. Standard MDM platforms (Samsung Knox, Microsoft Intune, AirWatch / Workspace ONE, Google Workspace MDM) push a policy that blocks uninstall of allowlisted apps. The end-user sees a *"this app cannot be removed — managed by your organization"* message. Auto Backup is the fallback for the rare case the MDM policy fails or is misconfigured.
 
 ## Build
 
@@ -69,7 +83,7 @@ analysis_options.yaml                                     Flutter lints
 
 ## Security model
 
-- **Admin passkey** is stretched with SHA-256 over 120,000 iterations + per-device 16-byte salt. Stored in EncryptedSharedPreferences (Android) / Keychain (iOS). Only used to authorize factory reset or passkey rotation.
+- **Admin passkey** is stretched with SHA-256 over 120,000 iterations + per-device 16-byte salt. The hash is stored in plain SharedPreferences (Android) / Keychain (iOS). Storing a salted+iterated hash is the same pattern as any database password column — the hash is safe at rest and cannot be reversed to recover the passkey. Encryption-at-rest on Android is deliberately disabled so Auto Backup can restore the data on reinstall (see Persistence section).
 - **One-time recovery code** is shown once at provisioning, hashed with independent salt. No hardcoded master passkey, no annual expiration, no developer backdoor.
 - **Failed-attempt lockout.** 5 wrong tries → 30 s cooldown, doubling each subsequent failed try up to ~32 min.
 - **Stored values are immutable after the typo-fix window closes.** A 15-minute window from the moment of initial sealing allows the admin to correct typos. Editing inside the window re-runs the verify + attest step. The window does not extend on edit. After it closes, the edit path is gone from the UI and no codepath can reach it. The only way to change a stored value is `Store.wipe()` (factory reset), which clears the passkey, recovery, and values together. Re-provisioning requires the operator to attest the new values against `*#06#` again.
