@@ -50,7 +50,10 @@ class Keys {
   static const failedCount = 'failed_count';
   static const lockoutUntilMs = 'lockout_until_ms';
   static const sealedAtMs = 'sealed_at_ms';
+  static const editGraceUntilMs = 'edit_grace_until_ms';
 }
+
+const _editGraceDuration = Duration(minutes: 15);
 
 class Store {
   static const _s = FlutterSecureStorage(
@@ -196,7 +199,9 @@ class _SetupFlowState extends State<SetupFlow> {
     await Store.write(Keys.passHash, passHash);
     await Store.write(Keys.recoverySalt, recSalt);
     await Store.write(Keys.recoveryHash, recHash);
-    await Store.write(Keys.sealedAtMs, DateTime.now().millisecondsSinceEpoch.toString());
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    await Store.write(Keys.sealedAtMs, nowMs.toString());
+    await Store.write(Keys.editGraceUntilMs, (nowMs + _editGraceDuration.inMilliseconds).toString());
     await Store.write(Keys.provisioned, '1');
 
     if (mounted) setState(() => _generatedRecovery = recovery);
@@ -863,12 +868,52 @@ class _PasskeyDialogState extends State<PasskeyDialog> {
   }
 }
 
-class AdminPage extends StatelessWidget {
+class AdminPage extends StatefulWidget {
   const AdminPage({super.key, required this.onReset, required this.onChanged});
   final VoidCallback onReset;
   final VoidCallback onChanged;
+  @override
+  State<AdminPage> createState() => _AdminPageState();
+}
 
-  Future<void> _factoryReset(BuildContext context) async {
+class _AdminPageState extends State<AdminPage> {
+  int _graceRemainingSec = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadGrace();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadGrace() async {
+    final raw = await Store.read(Keys.editGraceUntilMs) ?? '0';
+    final ms = int.tryParse(raw) ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (ms <= now) {
+      if (mounted) setState(() => _graceRemainingSec = 0);
+      return;
+    }
+    setState(() => _graceRemainingSec = ((ms - now) / 1000).ceil());
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      final remaining = ((ms - DateTime.now().millisecondsSinceEpoch) / 1000).ceil();
+      if (remaining <= 0) {
+        t.cancel();
+        if (mounted) setState(() => _graceRemainingSec = 0);
+      } else if (mounted) {
+        setState(() => _graceRemainingSec = remaining);
+      }
+    });
+  }
+
+  Future<void> _factoryReset() async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -888,24 +933,69 @@ class AdminPage extends StatelessWidget {
     );
     if (ok == true) {
       await Store.wipe();
-      onReset();
-      if (context.mounted) Navigator.of(context).pop();
+      widget.onReset();
+      if (mounted) Navigator.of(context).pop();
     }
+  }
+
+  Future<void> _openEdit() async {
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EditPage()));
+    widget.onChanged();
+    _loadGrace();
+  }
+
+  String _formatRemaining(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   @override
   Widget build(BuildContext context) {
+    final graceActive = _graceRemainingSec > 0;
     return Scaffold(
       appBar: AppBar(title: const Text('Admin')),
       body: ListView(
         children: [
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text(
-              'Stored device-info values are sealed and cannot be edited. Admin actions are limited to changing the passkey or factory-resetting and re-provisioning from scratch.',
-              style: TextStyle(fontSize: 13, color: Colors.black54, fontStyle: FontStyle.italic),
+          if (graceActive)
+            Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade700),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Typo-fix window: ${_formatRemaining(_graceRemainingSec)} remaining',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'You can edit stored values within this window to correct provisioning typos. After the window expires, values are permanently locked — the only change path becomes factory reset.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
+              ),
+            )
+          else
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                'Stored device-info values are sealed and cannot be edited. Admin actions are limited to changing the passkey or factory-resetting and re-provisioning from scratch.',
+                style: TextStyle(fontSize: 13, color: Colors.black54, fontStyle: FontStyle.italic),
+              ),
             ),
-          ),
+          if (graceActive)
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Edit values (typo fix)'),
+              subtitle: Text('Window closes in ${_formatRemaining(_graceRemainingSec)}'),
+              onTap: _openEdit,
+            ),
           ListTile(
             leading: const Icon(Icons.key_outlined),
             title: const Text('Change admin passkey'),
@@ -916,9 +1006,193 @@ class AdminPage extends StatelessWidget {
             leading: const Icon(Icons.delete_forever, color: Colors.red),
             title: const Text('Factory reset', style: TextStyle(color: Colors.red)),
             subtitle: const Text('Wipe everything and re-provision'),
-            onTap: () => _factoryReset(context),
+            onTap: _factoryReset,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class EditPage extends StatefulWidget {
+  const EditPage({super.key});
+  @override
+  State<EditPage> createState() => _EditPageState();
+}
+
+class _EditPageState extends State<EditPage> {
+  final _formKey = GlobalKey<FormState>();
+  final _imei = TextEditingController();
+  final _imei2 = TextEditingController();
+  final _eid = TextEditingController();
+  final _meid = TextEditingController();
+  final _serial = TextEditingController();
+  final _model = TextEditingController();
+  bool _loaded = false;
+  bool _windowClosed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final graceRaw = await Store.read(Keys.editGraceUntilMs) ?? '0';
+    final graceMs = int.tryParse(graceRaw) ?? 0;
+    if (DateTime.now().millisecondsSinceEpoch >= graceMs) {
+      if (mounted) setState(() => _windowClosed = true);
+      return;
+    }
+    _imei.text = await Store.read(Keys.imei) ?? '';
+    _imei2.text = await Store.read(Keys.imei2) ?? '';
+    _eid.text = await Store.read(Keys.eid) ?? '';
+    _meid.text = await Store.read(Keys.meid) ?? '';
+    _serial.text = await Store.read(Keys.serial) ?? '';
+    _model.text = await Store.read(Keys.model) ?? '';
+    if (mounted) setState(() => _loaded = true);
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_imei, _imei2, _eid, _meid, _serial, _model]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    final graceRaw = await Store.read(Keys.editGraceUntilMs) ?? '0';
+    final graceMs = int.tryParse(graceRaw) ?? 0;
+    if (DateTime.now().millisecondsSinceEpoch >= graceMs) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Edit window closed while you were typing. Values are now permanently sealed.')),
+        );
+        Navigator.of(context).pop();
+      }
+      return;
+    }
+
+    final fields = DeviceFields()
+      ..imei = _imei.text.trim()
+      ..imei2 = _imei2.text.trim()
+      ..eid = _eid.text.trim()
+      ..meid = _meid.text.trim()
+      ..serial = _serial.text.trim()
+      ..model = _model.text.trim();
+
+    if (!mounted) return;
+    final confirmed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('Verify corrected values'), automaticallyImplyLeading: false),
+          body: VerifyStep(
+            fields: fields,
+            onConfirmed: () => Navigator.of(context).pop(true),
+            onBack: () => Navigator.of(context).pop(false),
+          ),
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+
+    await Store.write(Keys.imei, fields.imei);
+    await Store.write(Keys.imei2, fields.imei2);
+    await Store.write(Keys.eid, fields.eid);
+    await Store.write(Keys.meid, fields.meid);
+    await Store.write(Keys.serial, fields.serial);
+    await Store.write(Keys.model, fields.model);
+
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_windowClosed) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Edit window closed')),
+        body: const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(
+            child: Text(
+              'The typo-fix window has closed. Stored values are now permanently sealed. To make a change, use Factory reset and re-provision the device.',
+              style: TextStyle(fontSize: 15),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+    }
+    if (!_loaded) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Edit values (typo fix)')),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade700),
+              ),
+              child: const Text(
+                'Only use this to correct a provisioning typo. Saving will re-run the verify step and require you to re-attest the new values against *#06#.',
+                style: TextStyle(fontSize: 13),
+              ),
+            ),
+            TextFormField(
+              controller: _imei,
+              decoration: const InputDecoration(labelText: 'IMEI'),
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(15)],
+              validator: (v) {
+                final t = (v ?? '').trim();
+                if (t.isEmpty) return 'Required';
+                if (!luhn15(t)) return 'Not a valid 15-digit IMEI';
+                return null;
+              },
+            ),
+            TextFormField(
+              controller: _imei2,
+              decoration: const InputDecoration(labelText: 'IMEI2'),
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(15)],
+              validator: (v) {
+                final t = (v ?? '').trim();
+                if (t.isEmpty) return null;
+                if (!luhn15(t)) return 'Not a valid 15-digit IMEI';
+                return null;
+              },
+            ),
+            TextFormField(
+              controller: _eid,
+              decoration: const InputDecoration(labelText: 'EID'),
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(32)],
+            ),
+            TextFormField(
+              controller: _meid,
+              decoration: const InputDecoration(labelText: 'MEID'),
+              inputFormatters: [LengthLimitingTextInputFormatter(14)],
+            ),
+            TextFormField(controller: _serial, decoration: const InputDecoration(labelText: 'Serial')),
+            TextFormField(controller: _model, decoration: const InputDecoration(labelText: 'Model')),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: _save,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text('Save (will re-verify)'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

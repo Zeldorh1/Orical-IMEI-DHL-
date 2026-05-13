@@ -15,7 +15,12 @@ Concretely, the threat this addresses is on-device value substitution: a warehou
    - Verify match: side-by-side comparison against `*#06#` with an attestation checkbox.
    - Set admin passkey. One-time recovery code is generated and shown — once only.
 2. **Normal use.** App opens straight to the barcode screen. Brightness auto-bumps to max. Tap "Verify against `*#06#`" for a reminder of the verify procedure.
-3. **Admin access.** Long-press the "Device Info" title → enter passkey or recovery code. Admin can change the passkey or factory-reset. There is no edit-values option, by design.
+3. **Admin access.** Long-press the "Device Info" title → enter passkey or recovery code. Admin can:
+   - **Within 15 minutes of initial seal**, edit values once (typo-fix window). Saving re-runs the verify + attest step. The window does not extend when you edit; once the 15 minutes from the *original* seal elapse, the edit option disappears forever.
+   - Change the admin passkey.
+   - Factory-reset (wipes everything; next launch starts a fresh provisioning).
+   
+   There is no edit-values option after the typo-fix window closes — by design.
 
 ## What it does *not* do
 
@@ -67,7 +72,7 @@ analysis_options.yaml                                     Flutter lints
 - **Admin passkey** is stretched with SHA-256 over 120,000 iterations + per-device 16-byte salt. Stored in EncryptedSharedPreferences (Android) / Keychain (iOS). Only used to authorize factory reset or passkey rotation.
 - **One-time recovery code** is shown once at provisioning, hashed with independent salt. No hardcoded master passkey, no annual expiration, no developer backdoor.
 - **Failed-attempt lockout.** 5 wrong tries → 30 s cooldown, doubling each subsequent failed try up to ~32 min.
-- **Stored values are immutable.** There is no edit path in the codebase, anywhere. The only way to change a stored value is `Store.wipe()` (factory reset), which clears the passkey, recovery, and values together. Re-provisioning requires the operator to attest the new values against `*#06#` again.
+- **Stored values are immutable after the typo-fix window closes.** A 15-minute window from the moment of initial sealing allows the admin to correct typos. Editing inside the window re-runs the verify + attest step. The window does not extend on edit. After it closes, the edit path is gone from the UI and no codepath can reach it. The only way to change a stored value is `Store.wipe()` (factory reset), which clears the passkey, recovery, and values together. Re-provisioning requires the operator to attest the new values against `*#06#` again.
 - **No network code.** No `INTERNET` permission requested on Android, no networking entitlements on iOS. The app is fully air-gapped after install.
 - **No device-identifier permissions.** No `READ_PHONE_STATE`, no `READ_BASIC_PHONE_STATE`, no Privacy Sensitive Info Type declarations. The OS will not grant or even prompt for these.
 
