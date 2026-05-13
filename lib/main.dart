@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -9,11 +8,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:intl/intl.dart';
 import 'package:screen_brightness/screen_brightness.dart';
-
-const _channel = MethodChannel('orical.imeitag/capture');
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,29 +35,6 @@ class App extends StatelessWidget {
   }
 }
 
-enum CaptureMode { manual, accessibility, mediaProjection }
-
-extension CaptureModeX on CaptureMode {
-  String get storageValue => name;
-  String get label {
-    switch (this) {
-      case CaptureMode.manual:
-        return 'Manual entry + attestation';
-      case CaptureMode.accessibility:
-        return 'Accessibility scrape (Android)';
-      case CaptureMode.mediaProjection:
-        return 'Screenshot OCR (Android)';
-    }
-  }
-
-  static CaptureMode? fromStorage(String? v) {
-    for (final m in CaptureMode.values) {
-      if (m.name == v) return m;
-    }
-    return null;
-  }
-}
-
 class Keys {
   static const provisioned = 'provisioned_v1';
   static const imei = 'imei';
@@ -76,8 +49,7 @@ class Keys {
   static const recoveryHash = 'recovery_hash';
   static const failedCount = 'failed_count';
   static const lockoutUntilMs = 'lockout_until_ms';
-  static const lastVerifiedMs = 'last_verified_ms';
-  static const captureMode = 'capture_mode';
+  static const sealedAtMs = 'sealed_at_ms';
 }
 
 class Store {
@@ -137,93 +109,6 @@ class DeviceFields {
   String model = '';
 }
 
-class NativeCapture {
-  static bool get isAndroid => Platform.isAndroid;
-
-  static Future<bool> isAccessibilityEnabled() async {
-    if (!isAndroid) return false;
-    try {
-      final r = await _channel.invokeMethod<bool>('isAccessibilityEnabled');
-      return r ?? false;
-    } on PlatformException {
-      return false;
-    }
-  }
-
-  static Future<void> openAccessibilitySettings() async {
-    if (!isAndroid) return;
-    try {
-      await _channel.invokeMethod<void>('openAccessibilitySettings');
-    } on PlatformException {
-      // ignore
-    }
-  }
-
-  static Future<DeviceFields?> captureViaAccessibility() async {
-    if (!isAndroid) return null;
-    try {
-      final r = await _channel.invokeMethod<Map<dynamic, dynamic>>('captureViaAccessibility');
-      if (r == null) return null;
-      return _fieldsFromMap(r);
-    } on PlatformException {
-      return null;
-    }
-  }
-
-  static Future<String?> captureScreenshot() async {
-    if (!isAndroid) return null;
-    try {
-      return await _channel.invokeMethod<String>('captureScreenshot');
-    } on PlatformException {
-      return null;
-    }
-  }
-
-  static Future<DeviceFields?> captureViaMediaProjection() async {
-    final path = await captureScreenshot();
-    if (path == null) return null;
-    try {
-      final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-      final inputImage = InputImage.fromFilePath(path);
-      final result = await recognizer.processImage(inputImage);
-      await recognizer.close();
-
-      final text = result.text;
-      final imeis = _extractImeis(text);
-      if (imeis.isEmpty) return null;
-      final fields = DeviceFields()
-        ..imei = imeis.isNotEmpty ? imeis[0] : ''
-        ..imei2 = imeis.length > 1 ? imeis[1] : '';
-      try {
-        final f = File(path);
-        if (await f.exists()) await f.delete();
-      } catch (_) {}
-      return fields;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static List<String> _extractImeis(String text) {
-    final candidates = RegExp(r'\d{15}').allMatches(text).map((m) => m.group(0)!).toList();
-    final valid = <String>{};
-    for (final c in candidates) {
-      if (luhn15(c)) valid.add(c);
-    }
-    return valid.toList();
-  }
-
-  static DeviceFields _fieldsFromMap(Map<dynamic, dynamic> map) {
-    return DeviceFields()
-      ..imei = (map['imei'] as String?) ?? ''
-      ..imei2 = (map['imei2'] as String?) ?? ''
-      ..eid = (map['eid'] as String?) ?? ''
-      ..meid = (map['meid'] as String?) ?? ''
-      ..serial = (map['serial'] as String?) ?? ''
-      ..model = (map['model'] as String?) ?? '';
-  }
-}
-
 class Bootstrap extends StatefulWidget {
   const Bootstrap({super.key});
   @override
@@ -270,119 +155,10 @@ class SetupFlow extends StatefulWidget {
 }
 
 class _SetupFlowState extends State<SetupFlow> {
-  CaptureMode? _mode;
-
-  @override
-  Widget build(BuildContext context) {
-    if (_mode == null) {
-      return ModeChooserPage(onChosen: (m) => setState(() => _mode = m));
-    }
-    return ModedSetup(
-      mode: _mode!,
-      onDone: widget.onDone,
-      onChangeMode: () => setState(() => _mode = null),
-    );
-  }
-}
-
-class ModeChooserPage extends StatelessWidget {
-  const ModeChooserPage({super.key, required this.onChosen});
-  final void Function(CaptureMode) onChosen;
-
-  @override
-  Widget build(BuildContext context) {
-    final isAndroid = Platform.isAndroid;
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Choose capture method'), automaticallyImplyLeading: false),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Padding(
-            padding: EdgeInsets.only(bottom: 8),
-            child: Text(
-              'How should this device acquire its IMEI?',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.only(bottom: 16),
-            child: Text(
-              'Once selected, this choice is sealed. You can change it later by factory-resetting the app from Admin.',
-              style: TextStyle(color: Colors.black54),
-            ),
-          ),
-          if (isAndroid) ...[
-            _option(
-              context,
-              title: 'Accessibility scrape',
-              subtitle:
-                  'After a one-time setup, the app opens Settings → About and the bundled accessibility service reads the IMEI text directly. One tap, no prompts after enablement. Recommended for warehouse handhelds.',
-              icon: Icons.accessibility_new_outlined,
-              onTap: () => onChosen(CaptureMode.accessibility),
-            ),
-            _option(
-              context,
-              title: 'Screenshot + on-device OCR',
-              subtitle:
-                  'No accessibility setup. Each capture prompts the standard Android "Start recording or casting" dialog. App screenshots Settings → About once, runs offline OCR, displays the barcode. No frames retained.',
-              icon: Icons.crop_free,
-              onTap: () => onChosen(CaptureMode.mediaProjection),
-            ),
-          ],
-          _option(
-            context,
-            title: 'Manual entry + match attestation',
-            subtitle:
-                'Operator types each value from this device\'s own *#06# / About screen, then ticks an attestation that every value matches. Works on iOS and Android.',
-            icon: Icons.edit_outlined,
-            onTap: () => onChosen(CaptureMode.manual),
-          ),
-          if (!isAndroid)
-            const Padding(
-              padding: EdgeInsets.only(top: 12),
-              child: Text(
-                'iOS does not allow any app to read another app\'s screen or hardware identifiers, so the auto-capture options are not available. Manual entry + attestation is the only path on iOS.',
-                style: TextStyle(color: Colors.black54, fontSize: 13),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _option(BuildContext context, {required String title, required String subtitle, required IconData icon, required VoidCallback onTap}) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        leading: Icon(icon),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text(subtitle),
-        ),
-        isThreeLine: true,
-        onTap: onTap,
-      ),
-    );
-  }
-}
-
-class ModedSetup extends StatefulWidget {
-  const ModedSetup({super.key, required this.mode, required this.onDone, required this.onChangeMode});
-  final CaptureMode mode;
-  final VoidCallback onDone;
-  final VoidCallback onChangeMode;
-  @override
-  State<ModedSetup> createState() => _ModedSetupState();
-}
-
-class _ModedSetupState extends State<ModedSetup> {
   int _step = 0;
   final _fields = DeviceFields();
   String _passkey = '';
   String? _generatedRecovery;
-  String? _captureError;
 
   void _useFields(DeviceFields f) {
     setState(() {
@@ -420,26 +196,10 @@ class _ModedSetupState extends State<ModedSetup> {
     await Store.write(Keys.passHash, passHash);
     await Store.write(Keys.recoverySalt, recSalt);
     await Store.write(Keys.recoveryHash, recHash);
-    await Store.write(Keys.captureMode, widget.mode.storageValue);
-    await Store.write(Keys.lastVerifiedMs, DateTime.now().millisecondsSinceEpoch.toString());
+    await Store.write(Keys.sealedAtMs, DateTime.now().millisecondsSinceEpoch.toString());
     await Store.write(Keys.provisioned, '1');
 
     if (mounted) setState(() => _generatedRecovery = recovery);
-  }
-
-  Future<void> _runAutoCapture() async {
-    setState(() => _captureError = null);
-    DeviceFields? captured;
-    if (widget.mode == CaptureMode.accessibility) {
-      captured = await NativeCapture.captureViaAccessibility();
-    } else if (widget.mode == CaptureMode.mediaProjection) {
-      captured = await NativeCapture.captureViaMediaProjection();
-    }
-    if (captured == null || captured.imei.isEmpty) {
-      if (mounted) setState(() => _captureError = 'Capture failed. Ensure the About / IMEI Information page is fully visible and try again.');
-      return;
-    }
-    _useFields(captured);
   }
 
   @override
@@ -450,19 +210,10 @@ class _ModedSetupState extends State<ModedSetup> {
 
     switch (_step) {
       case 0:
-        if (widget.mode == CaptureMode.manual) {
-          return EntryStep(initial: _fields, onNext: _useFields, onBack: widget.onChangeMode);
-        }
-        return AutoCaptureStep(
-          mode: widget.mode,
-          onCapture: _runAutoCapture,
-          error: _captureError,
-          onBack: widget.onChangeMode,
-        );
+        return EntryStep(initial: _fields, onNext: _useFields);
       case 1:
         return VerifyStep(
           fields: _fields,
-          mode: widget.mode,
           onConfirmed: _onVerified,
           onBack: () => setState(() => _step = 0),
         );
@@ -473,133 +224,10 @@ class _ModedSetupState extends State<ModedSetup> {
   }
 }
 
-class AutoCaptureStep extends StatefulWidget {
-  const AutoCaptureStep({super.key, required this.mode, required this.onCapture, required this.error, required this.onBack});
-  final CaptureMode mode;
-  final Future<void> Function() onCapture;
-  final String? error;
-  final VoidCallback onBack;
-  @override
-  State<AutoCaptureStep> createState() => _AutoCaptureStepState();
-}
-
-class _AutoCaptureStepState extends State<AutoCaptureStep> {
-  bool _busy = false;
-  bool _accessibilityReady = false;
-  bool _checkingAccessibility = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _refreshAccessibility();
-  }
-
-  Future<void> _refreshAccessibility() async {
-    if (widget.mode != CaptureMode.accessibility) {
-      setState(() {
-        _checkingAccessibility = false;
-        _accessibilityReady = true;
-      });
-      return;
-    }
-    final enabled = await NativeCapture.isAccessibilityEnabled();
-    if (mounted) {
-      setState(() {
-        _accessibilityReady = enabled;
-        _checkingAccessibility = false;
-      });
-    }
-  }
-
-  Future<void> _capture() async {
-    setState(() => _busy = true);
-    await widget.onCapture();
-    if (mounted) setState(() => _busy = false);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isAccessibility = widget.mode == CaptureMode.accessibility;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Step 1 of 3: Capture device info'),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text(
-            isAccessibility
-                ? 'This method uses an Android accessibility service to read IMEI text from the system Settings app. You must enable the bundled accessibility service once before the first capture.'
-                : 'This method captures one screenshot of Settings → About and runs offline OCR on it. Each capture will trigger the standard Android "Start recording or casting" dialog. The captured frame is not retained.',
-            style: const TextStyle(fontSize: 14, color: Colors.black87),
-          ),
-          const SizedBox(height: 24),
-          if (isAccessibility && _checkingAccessibility)
-            const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Center(child: CircularProgressIndicator())),
-          if (isAccessibility && !_checkingAccessibility && !_accessibilityReady) ...[
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.amber.shade100,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.shade700),
-              ),
-              child: const Text(
-                'The bundled accessibility service is NOT enabled yet.\n\n'
-                '1. Tap "Open accessibility settings" below.\n'
-                '2. Find "Device Info Reader" (or "Orical IMEI Tag") in the list.\n'
-                '3. Toggle it on, accept the system warning, return here.',
-                style: TextStyle(fontSize: 13),
-              ),
-            ),
-            const SizedBox(height: 16),
-            OutlinedButton(
-              onPressed: () async {
-                await NativeCapture.openAccessibilitySettings();
-              },
-              child: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text('Open accessibility settings'),
-              ),
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: _refreshAccessibility,
-              child: const Text('I have enabled it — recheck'),
-            ),
-          ],
-          if (_accessibilityReady || !isAccessibility) ...[
-            FilledButton.icon(
-              onPressed: _busy ? null : _capture,
-              icon: const Icon(Icons.cable),
-              label: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(_busy ? 'Capturing…' : 'Capture now'),
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Tip: the capture works best when the device\'s IMEI / About page is visible. The app will launch it for you. Hold the phone still until capture completes.',
-              style: TextStyle(color: Colors.black54, fontSize: 12),
-            ),
-          ],
-          if (widget.error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 20),
-              child: Text(widget.error!, style: const TextStyle(color: Colors.red)),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
 class EntryStep extends StatefulWidget {
-  const EntryStep({super.key, required this.initial, required this.onNext, required this.onBack});
+  const EntryStep({super.key, required this.initial, required this.onNext});
   final DeviceFields initial;
   final void Function(DeviceFields) onNext;
-  final VoidCallback onBack;
   @override
   State<EntryStep> createState() => _EntryStepState();
 }
@@ -638,7 +266,7 @@ class _EntryStepState extends State<EntryStep> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Step 1 of 3: Enter device info'),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
+        automaticallyImplyLeading: false,
       ),
       body: Form(
         key: _formKey,
@@ -649,7 +277,7 @@ class _EntryStepState extends State<EntryStep> {
               padding: EdgeInsets.only(bottom: 12),
               child: Text(
                 'Read each value from this same phone\'s Settings → About, or by dialing *#06#. '
-                'You will be asked to confirm the match in the next step.',
+                'You will be asked to confirm the match in the next step. Once sealed, values cannot be edited.',
                 style: TextStyle(fontSize: 14, color: Colors.black54),
               ),
             ),
@@ -694,9 +322,8 @@ class _EntryStepState extends State<EntryStep> {
 }
 
 class VerifyStep extends StatefulWidget {
-  const VerifyStep({super.key, required this.fields, required this.mode, required this.onConfirmed, required this.onBack});
+  const VerifyStep({super.key, required this.fields, required this.onConfirmed, required this.onBack});
   final DeviceFields fields;
-  final CaptureMode mode;
   final VoidCallback onConfirmed;
   final VoidCallback onBack;
   @override
@@ -729,11 +356,9 @@ class _VerifyStepState extends State<VerifyStep> {
               borderRadius: BorderRadius.circular(8),
               border: Border.all(color: Colors.amber.shade700),
             ),
-            child: Text(
-              widget.mode == CaptureMode.manual
-                  ? 'On this same phone, dial *#06# (or open Settings → About) and confirm every value below matches the value the device itself reports. Only confirm if every value is identical.'
-                  : 'These values were captured by the system. Confirm they look correct (e.g. number of digits, no obvious truncation). If anything looks wrong, go back and re-capture.',
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            child: const Text(
+              'On this same phone, dial *#06# (or open Settings → About) and confirm every value below matches what the device itself reports. Only confirm if every value is identical. Once sealed, no one can change these — even with the admin passkey.',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
             ),
           ),
           const SizedBox(height: 16),
@@ -752,10 +377,8 @@ class _VerifyStepState extends State<VerifyStep> {
             value: _attested,
             onChanged: (v) => setState(() => _attested = v ?? false),
             controlAffinity: ListTileControlAffinity.leading,
-            title: Text(
-              widget.mode == CaptureMode.manual
-                  ? 'I have visually compared every value above against this device\'s own *#06# / About output, and every value matches.'
-                  : 'These values are correctly captured and match this device\'s About / IMEI Information page.',
+            title: const Text(
+              'I have visually compared every value above against this device\'s own *#06# / About output, and every value matches.',
             ),
           ),
           const SizedBox(height: 16),
@@ -831,8 +454,8 @@ class _PasskeyStepState extends State<PasskeyStep> {
           padding: const EdgeInsets.all(16),
           children: [
             const Text(
-              'Set a passkey that will be required to edit, re-capture, or factory-reset device info. '
-              'A one-time recovery code will be shown next.',
+              'Set a passkey that will be required to factory-reset this device\'s sealed info. '
+              'A one-time recovery code will be shown next. The passkey CANNOT be used to edit values — only to wipe and re-provision.',
               style: TextStyle(color: Colors.black54),
             ),
             const SizedBox(height: 16),
@@ -896,7 +519,7 @@ class RecoveryCodePage extends StatelessWidget {
             const Text(
               'WRITE THIS DOWN OR PHOTOGRAPH IT NOW.\n\n'
               'This code is shown ONCE. If the admin passkey is ever lost, this code is the '
-              'only way to recover access without wiping the device.',
+              'only way to factory-reset this device without wiping it through Android/iOS settings.',
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 32),
@@ -938,8 +561,7 @@ class DisplayPage extends StatefulWidget {
 class _DisplayPageState extends State<DisplayPage> {
   Map<String, String> _values = {};
   bool _loading = true;
-  DateTime? _lastVerified;
-  CaptureMode _mode = CaptureMode.manual;
+  DateTime? _sealedAt;
 
   @override
   void initState() {
@@ -972,18 +594,16 @@ class _DisplayPageState extends State<DisplayPage> {
       final v = await Store.read(k) ?? '';
       if (v.isNotEmpty) values[k] = v;
     }
-    final ts = await Store.read(Keys.lastVerifiedMs);
-    DateTime? lv;
+    final ts = await Store.read(Keys.sealedAtMs);
+    DateTime? sealed;
     if (ts != null) {
       final ms = int.tryParse(ts);
-      if (ms != null) lv = DateTime.fromMillisecondsSinceEpoch(ms);
+      if (ms != null) sealed = DateTime.fromMillisecondsSinceEpoch(ms);
     }
-    final mode = CaptureModeX.fromStorage(await Store.read(Keys.captureMode)) ?? CaptureMode.manual;
     if (mounted) {
       setState(() {
         _values = values;
-        _lastVerified = lv;
-        _mode = mode;
+        _sealedAt = sealed;
         _loading = false;
       });
     }
@@ -996,7 +616,7 @@ class _DisplayPageState extends State<DisplayPage> {
     );
     if (ok == true && mounted) {
       await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => AdminPage(mode: _mode, onReset: widget.onReset, onChanged: _load),
+        builder: (_) => AdminPage(onReset: widget.onReset, onChanged: _load),
       ));
       _load();
     }
@@ -1010,7 +630,7 @@ class _DisplayPageState extends State<DisplayPage> {
         content: const Text(
           'On this same phone, dial *#06# or open Settings → About. '
           'Compare every value shown on this screen against what the device itself displays. '
-          'If anything differs, contact IT — do not use this barcode.',
+          'If anything differs, contact IT — do not accept this barcode at checkout.',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
@@ -1033,9 +653,9 @@ class _DisplayPageState extends State<DisplayPage> {
       if (_values[Keys.serial] != null) _RowSpec('Serial', _values[Keys.serial]!),
     ];
 
-    final verifiedText = _lastVerified == null
-        ? 'Not yet verified'
-        : 'Last verified: ${DateFormat('yyyy-MM-dd HH:mm').format(_lastVerified!)}';
+    final sealedText = _sealedAt == null
+        ? 'Sealed: unknown'
+        : 'Sealed: ${DateFormat('yyyy-MM-dd HH:mm').format(_sealedAt!)}';
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -1076,14 +696,8 @@ class _DisplayPageState extends State<DisplayPage> {
               ),
               Center(
                 child: Text(
-                  verifiedText,
+                  sealedText,
                   style: const TextStyle(fontSize: 11, color: Colors.black45),
-                ),
-              ),
-              Center(
-                child: Text(
-                  'Mode: ${_mode.label}',
-                  style: const TextStyle(fontSize: 10, color: Colors.black38),
                 ),
               ),
             ],
@@ -1250,8 +864,7 @@ class _PasskeyDialogState extends State<PasskeyDialog> {
 }
 
 class AdminPage extends StatelessWidget {
-  const AdminPage({super.key, required this.mode, required this.onReset, required this.onChanged});
-  final CaptureMode mode;
+  const AdminPage({super.key, required this.onReset, required this.onChanged});
   final VoidCallback onReset;
   final VoidCallback onChanged;
 
@@ -1261,7 +874,7 @@ class AdminPage extends StatelessWidget {
       builder: (_) => AlertDialog(
         title: const Text('Wipe all data?'),
         content: const Text(
-          'This will erase the stored device info, admin passkey, recovery code, and capture-mode choice. Cannot be undone.',
+          'This will erase the stored device info, admin passkey, and recovery code. Cannot be undone. The next launch will start a fresh provisioning.',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
@@ -1280,120 +893,29 @@ class AdminPage extends StatelessWidget {
     }
   }
 
-  Future<void> _recapture(BuildContext context) async {
-    DeviceFields? captured;
-    if (mode == CaptureMode.accessibility) {
-      captured = await NativeCapture.captureViaAccessibility();
-    } else if (mode == CaptureMode.mediaProjection) {
-      captured = await NativeCapture.captureViaMediaProjection();
-    } else {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Manual mode: stored values are sealed. Factory reset to re-provision.')),
-        );
-      }
-      return;
-    }
-    if (captured == null || captured.imei.isEmpty) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Capture failed. Make sure About / IMEI Information is visible.')),
-        );
-      }
-      return;
-    }
-
-    if (!context.mounted) return;
-    final confirmed = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Verify recaptured values')),
-          body: VerifyStep(
-            fields: captured!,
-            mode: mode,
-            onConfirmed: () => Navigator.of(context).pop(true),
-            onBack: () => Navigator.of(context).pop(false),
-          ),
-        ),
-      ),
-    );
-    if (confirmed != true) return;
-
-    await Store.write(Keys.imei, captured.imei);
-    await Store.write(Keys.imei2, captured.imei2);
-    await Store.write(Keys.eid, captured.eid);
-    await Store.write(Keys.meid, captured.meid);
-    await Store.write(Keys.serial, captured.serial);
-    await Store.write(Keys.model, captured.model);
-    await Store.write(Keys.lastVerifiedMs, DateTime.now().millisecondsSinceEpoch.toString());
-    onChanged();
-  }
-
-  Future<void> _reverify(BuildContext context) async {
-    final fields = DeviceFields()
-      ..imei = await Store.read(Keys.imei) ?? ''
-      ..imei2 = await Store.read(Keys.imei2) ?? ''
-      ..eid = await Store.read(Keys.eid) ?? ''
-      ..meid = await Store.read(Keys.meid) ?? ''
-      ..serial = await Store.read(Keys.serial) ?? ''
-      ..model = await Store.read(Keys.model) ?? '';
-
-    if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => VerifyStep(
-        fields: fields,
-        mode: mode,
-        onBack: () => Navigator.of(context).pop(),
-        onConfirmed: () async {
-          await Store.write(Keys.lastVerifiedMs, DateTime.now().millisecondsSinceEpoch.toString());
-          onChanged();
-          if (context.mounted) Navigator.of(context).pop();
-        },
-      ),
-    ));
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Admin')),
       body: ListView(
         children: [
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: Text('Capture mode: ${mode.label}'),
-            subtitle: const Text('To change, factory reset.'),
-          ),
-          const Divider(),
-          if (mode != CaptureMode.manual)
-            ListTile(
-              leading: const Icon(Icons.refresh),
-              title: const Text('Re-capture from device'),
-              subtitle: const Text('Run the configured capture path again and update stored values'),
-              onTap: () => _recapture(context),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text(
+              'Stored device-info values are sealed and cannot be edited. Admin actions are limited to changing the passkey or factory-resetting and re-provisioning from scratch.',
+              style: TextStyle(fontSize: 13, color: Colors.black54, fontStyle: FontStyle.italic),
             ),
-          ListTile(
-            leading: const Icon(Icons.fact_check_outlined),
-            title: const Text('Re-verify match'),
-            subtitle: const Text('Re-attest stored values without changing them'),
-            onTap: () => _reverify(context),
           ),
           ListTile(
             leading: const Icon(Icons.key_outlined),
             title: const Text('Change admin passkey'),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ChangePassPage())),
           ),
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text(
-              'Stored device-info values are immutable after sealing. To change them, factory-reset and re-provision. Auto-capture modes will re-read from this device\'s hardware on re-capture; values cannot be substituted.',
-              style: TextStyle(fontSize: 12, color: Colors.black54, fontStyle: FontStyle.italic),
-            ),
-          ),
           const Divider(),
           ListTile(
             leading: const Icon(Icons.delete_forever, color: Colors.red),
             title: const Text('Factory reset', style: TextStyle(color: Colors.red)),
+            subtitle: const Text('Wipe everything and re-provision'),
             onTap: () => _factoryReset(context),
           ),
         ],

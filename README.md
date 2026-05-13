@@ -1,55 +1,33 @@
 # Orical IMEI Tag
 
-Cross-platform Flutter app that captures a phone's IMEI / IMEI2 / EID / Serial and renders them as on-screen CODE128 barcodes, laid out to match iOS's built-in `Settings → General → About → Device Info` screen. Sideload-only, fully offline, no network code.
+Cross-platform Flutter app that holds a phone's IMEI / IMEI2 / EID / Serial and renders them as on-screen CODE128 barcodes, laid out to match iOS's built-in `Settings → General → About → Device Info` screen. Sideload-only, fully offline, no network code, no analytics, no telemetry.
 
-## Use case
+## What it's for
 
-Warehouse / fulfillment-center workers need to produce a scannable IMEI from each phone they are processing, in a form bound to the physical device so a worker cannot present a screenshot of someone else's phone at a checkpoint. This app provides three input paths (two automatic on Android, manual+attestation on iOS) and seals the captured value so it cannot be edited later by anyone — including the admin — without a destructive factory reset.
+Warehouse / fulfillment-center workflow: each phone, on intake, gets provisioned once by IT. The operator types the IMEI from the device's own `*#06#` / `Settings → About` screen, ticks an attestation that every value matches, and sets an admin passkey. The values are then **sealed** — no one (including the admin) can edit them afterwards. The app shows the barcode on demand for checkpoint scanning. The only way to change a stored value is to factory-reset and re-provision, which requires the admin passkey.
 
-## Capture modes
+Concretely, the threat this addresses is on-device value substitution: a warehouse associate, even one who somehow obtains the admin passkey, cannot type in a different IMEI to make a phone present as a different device at checkout. The passkey unlocks "wipe and start over," not "edit."
 
-The mode is chosen once at first launch and is part of the sealed state. Changing modes requires factory-resetting the app and re-provisioning the device.
+## Flow
 
-### 1. Accessibility scrape (Android, recommended)
+1. **First launch.** App walks operator through 3 steps:
+   - Enter IMEI (required, Luhn-15 validated), IMEI2, EID, MEID, Serial, Model.
+   - Verify match: side-by-side comparison against `*#06#` with an attestation checkbox.
+   - Set admin passkey. One-time recovery code is generated and shown — once only.
+2. **Normal use.** App opens straight to the barcode screen. Brightness auto-bumps to max. Tap "Verify against `*#06#`" for a reminder of the verify procedure.
+3. **Admin access.** Long-press the "Device Info" title → enter passkey or recovery code. Admin can change the passkey or factory-reset. There is no edit-values option, by design.
 
-- One-time setup: enable the bundled `AccessibilityScrapeService` in `Settings → Accessibility → Installed services`. Android shows its standard warning about what an accessibility service can see — that warning is required by design and cannot be hidden.
-- Per capture: the app launches `Settings → About` via intent. The accessibility service reads visible text from the Settings page (its `android:packageNames` is restricted to settings packages — the service cannot observe any other app), filters with the IMEI regex + Luhn check, and stores the first one or two valid IMEIs it sees.
-- Throughout normal use the service does nothing — it only collects text while a capture is actively in progress, and disables itself again afterwards.
+## What it does *not* do
 
-### 2. Screenshot + on-device OCR (Android, fallback)
+Stated up front so the security pitch isn't oversold:
 
-- No accessibility setup ever.
-- Per capture: app starts a foreground `MediaProjection` service. The standard Android *"Start recording or casting?"* system dialog appears — this dialog cannot be suppressed; Google enforces user consent every time.
-- After the user taps *Start now*, the app launches `Settings → About`, waits ~1.8 s for the page to render, captures a single frame, encodes it as JPEG to private cache storage, then stops projection.
-- Flutter side runs offline OCR (Google ML Kit text recognition, packaged in the APK) over the saved JPEG, extracts 15-digit Luhn-valid IMEI patterns, and deletes the JPEG.
-
-### 3. Manual entry + match attestation (iOS, and Android fallback)
-
-- iOS has no equivalent of either Android capture path. No app on iOS — first-party, sideloaded, MDM-deployed, or enterprise-signed — can read another app's screen or any non-resettable hardware identifier. So iOS uses the manual path: an IT operator reads each value off the phone's own `Settings → About` (or `*#06#`), types it into the app, and ticks an attestation checkbox affirming every value matches.
-- Auto-validation: the form runs Luhn-15 over the typed IMEI before allowing the form to advance, catching typos. Also available as a third option on Android if the customer doesn't want accessibility or projection.
-
-## Immutability
-
-After sealing on initial provisioning, stored values are **immutable**:
-
-- There is no "edit" feature in the admin pane.
-- Admin can **re-capture** (auto modes only — re-runs the configured capture path against this device's hardware, so substitution is impossible — the captured value is whatever the OS itself shows on this phone).
-- Admin can **re-verify** to refresh the `Last verified` stamp without changing values.
-- Admin can **factory reset**, which wipes all stored values, passkey, recovery code, and capture-mode choice. The next launch goes back to the capture-mode chooser.
-
-This means a warehouse associate, even if they obtain the admin passkey, cannot type in a different IMEI to make a phone present as a different device. They can only re-read from hardware or wipe everything.
-
-## What this does *not* protect against
-
-The threat model addressed is **on-device value substitution** by someone with admin-passkey access. The following threats are explicitly out of scope:
-
-- **Photographing the displayed barcode with another camera.** Even without screenshot capability, a person can point a second phone at the screen and capture the barcode visually. Real mitigations require a checkpoint workflow that does not trust a static, app-rendered barcode — e.g., dial `*#06#` directly at the checkpoint, or use a server-issued time-bound nonce embedded in the barcode that the checkpoint scanner can validate. Neither is provided here.
-- **Rooted / jailbroken devices.** Anything on-device can be tampered with given root.
-- **The iOS manual path** depends on the IT operator typing the *correct* IMEI at provisioning. There is no way to verify this against hardware on iOS, period; manual + attestation is the strongest assertion the platform allows.
+- **Does not bind the stored IMEI to device hardware.** The operator types the value during provisioning. The defense against substitution rests on (a) the operator doing the attestation honestly at provisioning and (b) values being immutable after sealing. If the wrong IMEI is typed at step 1 and the attestation is ticked anyway, the wrong IMEI gets sealed.
+- **Does not prevent photographing the displayed barcode.** Someone can point a second camera at the screen and capture the barcode visually; the resulting image can be displayed on a different phone. The defense against this is workflow, not software — e.g., the checkpoint also dials `*#06#` directly, or visually inspects that the operator is holding one phone, not stacking two.
+- **Does not survive a rooted/jailbroken device.** Anything on-device can be tampered with given root.
 
 ## Build
 
-This is a vanilla Flutter project — the repo only contains the customized source files. Platform boilerplate (Gradle wrapper, Xcode project, launch screens, icons, etc.) is filled in by `flutter create`, which will not overwrite the customized files.
+This repo contains the customized source. Platform boilerplate (Gradle wrapper, Xcode project, launch screens, icons) is filled in by `flutter create`, which does not overwrite the customized files.
 
 ```bash
 flutter create --org com.orical --project-name orical_imeitag .
@@ -62,7 +40,7 @@ flutter pub get
 flutter build apk --release
 ```
 
-Output: `build/app/outputs/flutter-apk/app-release.apk`. Install with *Install from unknown sources*.
+Output: `build/app/outputs/flutter-apk/app-release.apk`. Install with *Install from unknown sources*. The signed APK does not expire — once on the device it runs indefinitely.
 
 ### iOS IPA
 
@@ -70,27 +48,32 @@ Output: `build/app/outputs/flutter-apk/app-release.apk`. Install with *Install f
 flutter build ipa --release   # macOS + Xcode 15 required
 ```
 
-Output: `build/ios/ipa/orical_imeitag.ipa`. Distribute via Apple Configurator 2, AltStore, or your Apple Business Manager / enterprise account. **This build is not intended for App Store submission.**
+Output: `build/ios/ipa/orical_imeitag.ipa`. Distribute via Apple Configurator 2, AltStore, or your Apple Developer account. **Not intended for App Store submission.** The IPA must be re-signed when the distribution certificate expires (annually for individual / 3 years for enterprise).
 
 ## Source layout
 
 ```
-pubspec.yaml                                              Flutter deps (incl. ML Kit OCR)
-lib/main.dart                                             Full app: chooser, setup, capture, display, admin
-android/app/src/main/AndroidManifest.xml                  Permissions, accessibility service, projection service
-android/app/src/main/res/xml/accessibility_service_config.xml   Scope-restricted accessibility config
-android/app/src/main/res/values/strings.xml               App + accessibility service strings
-android/app/src/main/kotlin/com/orical/imeitag/
-    MainActivity.kt                                       MethodChannel for capture commands
-    AccessibilityScrapeService.kt                         Settings-only text reader
-    ScreenCaptureService.kt                               MediaProjection foreground service
+pubspec.yaml                                              Flutter dependencies (5 small ones, no native code)
+lib/main.dart                                             Full app
+android/app/src/main/AndroidManifest.xml                  Minimal manifest, single activity
+android/app/src/main/res/values/strings.xml               app_name
+android/app/src/main/kotlin/com/orical/imeitag/MainActivity.kt   Plain FlutterActivity
 ios/Runner/Info.plist                                     iOS bundle config
 analysis_options.yaml                                     Flutter lints
 ```
 
-## Security knobs
+## Security model
 
-- Admin passkey: stretched with SHA-256 over 120,000 iterations + per-device 16-byte salt. Stored in EncryptedSharedPreferences (Android) / Keychain (iOS).
-- One-time recovery code: shown once at provisioning. Hashed with independent salt. **No hardcoded master passkey, no annual expiration, no developer backdoor.**
-- Failed-attempt lockout: 5 wrong tries → 30 s cooldown, doubling each subsequent failed try up to ~32 min.
-- No `INTERNET` permission requested. No `READ_PHONE_STATE`. No `READ_BASIC_PHONE_STATE`.
+- **Admin passkey** is stretched with SHA-256 over 120,000 iterations + per-device 16-byte salt. Stored in EncryptedSharedPreferences (Android) / Keychain (iOS). Only used to authorize factory reset or passkey rotation.
+- **One-time recovery code** is shown once at provisioning, hashed with independent salt. No hardcoded master passkey, no annual expiration, no developer backdoor.
+- **Failed-attempt lockout.** 5 wrong tries → 30 s cooldown, doubling each subsequent failed try up to ~32 min.
+- **Stored values are immutable.** There is no edit path in the codebase, anywhere. The only way to change a stored value is `Store.wipe()` (factory reset), which clears the passkey, recovery, and values together. Re-provisioning requires the operator to attest the new values against `*#06#` again.
+- **No network code.** No `INTERNET` permission requested on Android, no networking entitlements on iOS. The app is fully air-gapped after install.
+- **No device-identifier permissions.** No `READ_PHONE_STATE`, no `READ_BASIC_PHONE_STATE`, no Privacy Sensitive Info Type declarations. The OS will not grant or even prompt for these.
+
+## Maintenance
+
+- **The code itself does not need updates.** Form input, SHA-256, Code128 rendering, Keychain/EncryptedSharedPreferences — all stable for 10+ years and counting.
+- **Android.** Once installed, the signed APK runs indefinitely. The only thing that would ever force an update is the buyer wanting a new feature.
+- **iOS.** The IPA must be re-signed when the Apple distribution certificate expires. With an Apple Developer Enterprise certificate that's every 3 years; with a regular Apple Developer Program certificate that's every year. Re-signing requires Xcode and the original signing identity — typically a half-day operation, no code changes.
+- **Flutter SDK drift.** Roughly every 3-5 years a full rebuild against current Flutter + Xcode may be needed if the iOS deployment target gets too old to install on new iPhones. Usually 0–10 lines of code touched.
