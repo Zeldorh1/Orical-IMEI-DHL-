@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Device Info</string>
+    <string name="accessibility_service_description">Reads device identification numbers (IMEI, EID, Serial) from the system Settings app and converts them into scannable barcodes within this app. The service is restricted to the Settings package and reads no other app data.</string>
+    <string name="accessibility_service_summary">Reads IMEI from system Settings for barcode rendering.</string>
+</resources>
